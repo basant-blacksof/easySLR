@@ -6,10 +6,10 @@ import {
   type NextAuthOptions,
 } from "next-auth";
 import { type Adapter } from "next-auth/adapters";
-// import DiscordProvider from "next-auth/providers/discord";
-
-// import { env } from "~/env";
 import { db } from "~/server/db";
+import CredentialsProvider from "next-auth/providers/credentials";
+import { compare, hash } from "bcryptjs";
+// import { env } from "~/env";
 
 /**
  * Module augmentation for `next-auth` types. Allows us to add custom properties to the `session`
@@ -21,6 +21,7 @@ declare module "next-auth" {
   interface Session extends DefaultSession {
     user: DefaultSession["user"] & {
       id: string;
+      name?: string; // Ensure name is available
       // ...other properties
       // role: UserRole;
     };
@@ -39,16 +40,60 @@ declare module "next-auth" {
  */
 export const authOptions: NextAuthOptions = {
   callbacks: {
-    session: ({ session, user }) => ({
+    session: ({ session, token }) => ({
       ...session,
+      accessToken: token.accessToken,
       user: {
         ...session.user,
-        id: user.id,
+        id: token.id,
+        // name: user.name, // Include name in session
       },
     }),
   },
   adapter: PrismaAdapter(db) as Adapter,
   providers: [
+    CredentialsProvider({
+      name: "Credentials",
+      credentials: {
+        name: { label: "Name", type: "text" }, // For signup
+        email: { label: "Email", type: "email" },
+        password: { label: "Password", type: "password" },
+      },
+      async authorize(credentials) {
+        if (!credentials?.email || !credentials?.password) {
+          throw new Error("Email and password are required");
+        }
+
+        const user = await db.user?.findUnique({
+          where: { email: credentials.email },
+        });
+
+        // Signup flow (if name is provided and no user exists)
+        if (credentials.name && !user) {
+          const hashedPassword = await hash(credentials.password, 10);
+          const newUser = await db.user.create({
+            data: {
+              name: credentials.name,
+              email: credentials.email,
+              password: hashedPassword, // Store hashed password
+            },
+          });
+          return { id: newUser.id, name: newUser.name, email: newUser.email };
+        }
+
+        // Signin flow
+        if (!user?.password) {
+          throw new Error("Invalid credentials");
+        }
+
+        const isValid = await compare(credentials.password, user.password);
+        if (!isValid) {
+          throw new Error("Invalid credentials");
+        }
+
+        return { id: user.id, name: user.name, email: user.email };
+      },
+    }),
     // DiscordProvider({
     //   clientId: env.DISCORD_CLIENT_ID,
     //   clientSecret: env.DISCORD_CLIENT_SECRET,
@@ -63,6 +108,13 @@ export const authOptions: NextAuthOptions = {
      * @see https://next-auth.js.org/providers/github
      */
   ],
+  session: {
+    strategy: "jwt",
+  },
+  secret: process.env.NEXTAUTH_SECRET,
+  pages: {
+    signIn: "/signin", // Custom signin page
+  },
 };
 
 /**
